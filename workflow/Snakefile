@@ -1,0 +1,331 @@
+import pandas as pd
+import re
+import os
+
+master_snakefile_prefix = os.path.dirname(os.path.dirname(workflow.snakefile))
+
+configfile: master_snakefile_prefix + "/config/config.yaml"
+manifest = config.get('manifest', 'config/manifest.tab')
+target_ref = config["target_ref"]
+
+manifest_df = pd.read_table(manifest, dtype={'sample': str, 'group': str}).set_index(['sample', 'group'], drop=False)
+
+FLANKING = config.get('flank', 5000)
+SVBYEYE_CONTAINER = config['svbyeye_cntr']
+
+wildcard_constraints:
+    sample='|'.join(manifest_df.index.get_level_values('sample').unique()),
+    group='|'.join(manifest_df.index.get_level_values('group').unique())
+
+def get_final_output(wildcards):
+    final_output = []
+
+    unique_groups = manifest_df.index.get_level_values('group').unique()
+
+    for g in unique_groups:
+        order_list = config["view_order"][str(g)].split(";")
+        sv_id_list = get_group_df(df=manifest_df, group_name=g).xs('sv_id', axis=1).unique().tolist()
+        for entry in sv_id_list:
+            final_output.extend(
+                [ f'results/{g}/{entry}/{g}_view-{view}.png' for view in range(len(order_list)) ]
+            )
+
+    return final_output
+
+def get_group_df(df, group_name):
+    current_df = df.copy()
+    current_df = current_df.query(fr"group == '{group_name}'")
+
+    # Get the cartesian product of the native_sv_id column
+    current_df["sv_id"] = current_df["group"].map(config["sv_id"])
+    current_df["sv_id"] = current_df.sv_id.str.split(',')
+    current_df = current_df.explode('sv_id')
+
+    return current_df
+
+def get_aln(wildcards):
+    return manifest_df.at[(wildcards.sample, wildcards.group), 'aln']
+
+def get_fasta(wildcards):
+    return manifest_df.at[(wildcards.sample, wildcards.group), 'asm']
+
+def get_ava_input(wildcards):
+    sample_list = config["view_order"][wildcards.group].split(";")[int(wildcards.view)].split(":")
+    return expand('results/{{group}}/{{id}}/tmp/{sample}.fasta', sample=sample_list)
+
+
+def calc_mem_gb(wildcards, input, attempt, threads):
+    mb = max(1.5 * input.size_mb, 1000)
+    gb = int(mb / 1000)
+
+    if threads != 1:
+        gb = int(max(gb / threads, 2))
+
+    return gb * attempt
+
+def get_svbyeye_param(wildcards):
+    figure_title = f"{wildcards.id}-{target_ref}"
+
+    # Get the desired view order
+    sample_list = config["view_order"][wildcards.group].split(";")[int(wildcards.view)].split(":")
+
+    # If reference is in the view order, replace target_ref -> chrom/contig name
+    sample_list = [ x.replace(target_ref, wildcards.id.split("-")[0]) if target_ref in x else x for x in sample_list ]
+
+    return {
+        "seqnames_order": sample_list,
+        "figure_title": figure_title,
+    }
+
+def get_region(which_type):
+
+    def inner(wildcards):
+        sv_native_id = str(wildcards.id)
+        pattern = re.compile(r"(?P<contig>.+)-(?P<pos>\d+)-(?P<svtype>\S+)-(?P<svlen>\d+)")
+        match = pattern.match(sv_native_id).groupdict()
+
+        svtype = match['svtype'].lower()
+        if svtype == 'ins':
+            match['start'] = int(match["pos"]) - FLANKING
+            match['end'] = int(match["pos"]) + FLANKING
+        elif svtype == 'del':
+            match['start'] = int(match["pos"]) - FLANKING
+            match['end'] = int(match["pos"]) + FLANKING + int(match["svlen"])
+        else:
+            raise ValueError(f'Unsupported {match["svtype"]}, only INS and DEL at the moment.')
+
+        if which_type == 'bed':
+            # because bed formt is 0-based
+            start_pos = int(match['start']) - 1
+            return f"{match['contig']}\\t{start_pos}\\t{match['end']}"
+        elif which_type == 'interval':
+            return f"{match['contig']}:{match['start']}-{match['end']}"
+        else:
+            raise ValueError(f'Unsupported option: {which_type}')
+
+    return inner
+
+rule all:
+    input:
+        get_final_output
+
+rule convert_to_sam:
+    input:
+        aln = get_aln
+    output:
+        sam = temp('results/{group}/{id}/tmp/{sample}.sam')
+    params:
+        region = get_region(which_type='interval'),
+        samtools_cram_arg = lambda wildcards: f"--reference {config['reference'].get(target_ref, '')}"
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "samtools/1.17",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs = 72
+    shell:
+        '''
+        samtools view --with-header {params.samtools_cram_arg} --output {output.sam} {input.aln} {params.region}
+        '''
+
+rule convert_to_paf:
+    input:
+        subset_sam = 'results/{group}/{id}/tmp/{sample}.sam'
+    output:
+        paf = temp('results/{group}/{id}/tmp/{sample}.paf')
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "minimap2/2.24",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs = 72
+    shell:
+        '''
+        paftools.js sam2paf -L {input.subset_sam} > {output.paf}
+        '''
+
+# Go back to assembly coordinates
+rule paf_liftover:
+    input:
+        paf = 'results/{group}/{id}/tmp/{sample}.paf'
+    output:
+        lifted_paf = 'results/{group}/{id}/tmp/{sample}-lifted.paf'
+    params:
+        region = get_region(which_type='bed')
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "rustybam/0.1.29",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs = 72
+    shell:
+        '''
+        rustybam liftover {input.paf} --bed <(echo -e "{params.region}") > {output.lifted_paf}
+        '''
+
+rule extract_sequence:
+    input:
+        fasta = get_fasta,
+        lifted_paf = 'results/{group}/{id}/tmp/{sample}-lifted.paf'
+    output:
+        subset_fasta = 'results/{group}/{id}/tmp/{sample}.fasta'
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "samtools/1.17",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs = 72
+    shell:
+        '''
+        # Get interval format
+        query_region=$(awk '{{print $1,":",$3,"-",$4}}' OFS='' FS='\t' {input.lifted_paf})
+        
+        # Subset the fasta to desired interval & insert the sample name into the header of fasta
+        samtools faidx {input.fasta} $query_region > {output.subset_fasta} \
+            && \
+            sed -i -r "s/>(.+):([0-9].+)-([0-9].+)/>{wildcards.sample}/" {output.subset_fasta}
+        '''
+
+rule ref_extract_seq:
+    input:
+        fasta = config["reference"][target_ref],
+    output:
+        subset_fasta = 'results/{group}/{id}/tmp/' + target_ref + '.fasta'
+    params:
+        region= get_region(which_type='interval'),
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "samtools/1.17",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs = 72
+    shell:
+        '''
+        # Subset the fasta to desired interval & insert the sample name into the header of fasta
+        samtools faidx {input.fasta} {params.region} > {output.subset_fasta}
+
+	    chrom=$(echo {params.region} | cut -f1 -d':')
+        sed -i -r "s/>(.+):([0-9].+)-([0-9].+)/>${{chrom}}/" {output.subset_fasta}
+        '''
+
+rule all_vs_all:
+    input:
+        group_fasta = get_ava_input
+    output:
+        ava_paf = 'results/{group}/{id}/tmp/{group}_view-{view}.paf'
+    params:
+        minimap = config.get("minimap_params","-x asm20 -c --eqx -DP --dual=no --no-long-join"),
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "minimap2/2.24",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs=72
+    shell:
+        '''
+        minimap2 {params.minimap} <(cat {input.group_fasta}) <(cat {input.group_fasta}) > {output.ava_paf}
+        '''
+
+rule orient_majority:
+    input:
+        ava_paf = 'results/{group}/{id}/tmp/{group}_view-{view}.paf'
+    output:
+        oriented_ava_paf = 'results/{group}/{id}/{group}_view-{view}-oriented.paf'
+    envmodules:
+        "modules",
+        "modules-init",
+        "modules-gs/prod",
+        "modules-eichler/prod",
+        "rustybam/0.1.29",
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs=72
+    shell:
+        """
+        rustybam orient {input.ava_paf} > {output.oriented_ava_paf}
+
+        # Need to adjust first column of output because rustybam appends the strand to the first column string.
+        sed -i -r 's/([^\\t])([+-]{{1}})\\t(.*)/\\1\\t\\3/' {output.oriented_ava_paf}
+        """
+
+rule shift_anno_positions:
+    """shift annotation bed file coordinates to all versus all coordinates"""
+    input:
+        oriented_ava_paf = 'results/{group}/{id}/{group}_view-{view}-oriented.paf',
+        anno_bed_file = lambda wildcards: config["annotations"][target_ref]
+    output:
+        anno_bed_shifted = 'results/{group}/{id}/{group}_view-{view}-annotation_shifted.bed'
+    params:
+        region = get_region(which_type='bed'),
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs=72
+    run:
+        df = pd.read_table(input.anno_bed_file,header=0, dtype={"start": int, "end": int})
+
+        target_columns=["chrom", "start", "end", "label", "color"]
+        result_df = pd.DataFrame(columns=target_columns)
+        region_start = int(params.region.split('\\t')[1])
+
+        for idx, row in df.iterrows():
+            feature_len_diff = row["end"] - row["start"]
+            try:
+                if idx == 0:
+                    start_pos = (row["start"] - region_start) # answers: how far is the start from SV position?
+                    end_pos = (start_pos + feature_len_diff)
+                    result_df.loc[idx, :] = row["chrom"], start_pos, end_pos, row["label"], row["color"]
+                else:
+                    prev_feature_dist = row["start"] - df.loc[(idx - 1), "end"]
+                    start_pos = end_pos + prev_feature_dist
+                    end_pos = start_pos + feature_len_diff
+                    result_df.loc[idx, :] = row["chrom"], start_pos, end_pos, row["label"], row["color"]
+            except KeyError:
+                pass
+
+        del df
+        # Take only the positive integers
+        result_df = result_df[(result_df[["start", "end"]] > 0).all(axis=1)].reset_index(drop=True)
+        result_df.to_csv(output.anno_bed_shifted, header=True, index=False, sep="\t", columns=target_columns)
+
+
+rule svbyeye:
+    input:
+        oriented_ava_paf = 'results/{group}/{id}/{group}_view-{view}-oriented.paf',
+        anno_bed_shifted = 'results/{group}/{id}/{group}_view-{view}-annotation_shifted.bed'
+    output:
+        ava_png = 'results/{group}/{id}/{group}_view-{view}.png'
+    log: 'results/{group}/{id}/log/{group}_view-{view}.log'
+    params: get_svbyeye_param
+    container: SVBYEYE_CONTAINER
+    threads: 1
+    resources:
+        mem=calc_mem_gb,
+        hrs=72
+    script:
+        'scripts/sv-by-eye_miropeat.R'

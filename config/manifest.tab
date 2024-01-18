@@ -1,0 +1,3 @@
+sample	group	asm	aln
+14455_p1_hap1	14455	/net/eichler/vol28/projects/long_read_archive/nobackups/clinical/14455_p1/assemblies/hifiasm/trio/0.16.1/14455_p1.hifiasm.dip.hap1.p_ctg.gfa.fasta	/net/eichler/vol27/projects/autism_genome_assembly/nobackups/variant_calling/GRCh38/pav/1.1.2/all/results/14455_p1/align/aligned_tig_h1.cram
+14455_s1_hap2	14455	/net/eichler/vol28/projects/long_read_archive/nobackups/clinical/14455_s1/assemblies/hifiasm/trio/0.16.1/14455_s1.hifiasm.dip.hap2.p_ctg.gfa.fasta	/net/eichler/vol27/projects/autism_genome_assembly/nobackups/variant_calling/GRCh38/pav/1.1.2/all/results/14455_s1/align/aligned_tig_h2.cram

@@ -1,0 +1,19 @@
+flank: 5000
+svbyeye_cntr: "/net/eichler/vol28/software/containers/R/SVbyEye/926575d/SVbyEye_0.99.0.sif"
+manifest: config/manifest.tab
+target_ref: GRCh38
+
+annotations:
+ GRCh38: ARHGAP26.bed4
+
+minimap_params: "-x asm20 -c --eqx -DP --dual=no --no-long-join"
+
+# this is only necessary if you're supplying crams where the reference header tag UR is not accessible
+reference:
+  GRCh38: "/net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/hg38.no_alt.fa"
+
+sv_ids:
+ '12651': chr5-142980831-DEL-5370
+
+view_order:
+  '12651': GRCh38:12651_p1_hap1:12651_p1_hap2;GRCh38:12651_fa_hap1:12651_fa_hap2:12651_mo_hap1:12651_mo_hap2:12651_p1_hap1:12651_p1_hap2:12651_s1_hap1:12651_s1_hap2
