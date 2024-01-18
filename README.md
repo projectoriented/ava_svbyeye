@@ -1,2 +1,3 @@
-Please find instructions here:
-https://eichlerlab.gs.washington.edu/help/wiki/doku.php?id=users:lettucerap:ava_svbyeye
+## All versus all alignment
+
+This pipeline does an all vs. all alignment and outputs an SVbyEye figure.
