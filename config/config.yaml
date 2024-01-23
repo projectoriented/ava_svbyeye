@@ -8,7 +8,6 @@ annotations:
 
 minimap_params: "-x asm20 -c --eqx -DP --dual=no --no-long-join"
 
-# this is only necessary if you're supplying crams where the reference header tag UR is not accessible
 reference:
   GRCh38: "/net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/hg38.no_alt.fa"
 
