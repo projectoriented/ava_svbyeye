@@ -11,7 +11,7 @@ minimap_params: "-x asm20 -c --eqx -DP --dual=no --no-long-join"
 reference:
   GRCh38: "/net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/hg38.no_alt.fa"
 
-sv_ids:
+sv_id:
  '12651': chr5-142980831-DEL-5370
 
 view_order:
